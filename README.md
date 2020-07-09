@@ -6,17 +6,17 @@
 
 - 恢复：从xml文件将备份的数据恢复到指定结点。
 
-##一、备份
+## 一、备份
 ```
 python TiZkBackupRestore.py -t backup -p / -f zk_backup.xml --hosts 10.0.10.112:2181 -a "digest=jyp:123456" -d
 ```
 
-##二、恢复
+## 二、恢复
 ```
 python TiZkBackupRestore.py -t restore -p / -f zk_backup.xml --hosts 10.0.10.112:2181 -a "digest=jyp:123456" -d
 ```
 
-##三、节点复制
+## 三、节点复制
 
   此工具也可作为节点复制工具，示例如下：
 ```
@@ -25,7 +25,7 @@ python TiZkBackupRestore.py -t backup -p /node1 -f zk_backup.xml --hosts 10.0.10
 python TiZkBackupRestore.py -t restore -p /node2 -f zk_backup.xml --hosts 10.0.10.112:2181 -a "digest=jyp:123456" -d
 ```
 
-##四、参数说明
+## 四、参数说明
 ```
   -h    显示帮助
   -t    类型，backup=备份，restore=恢复
