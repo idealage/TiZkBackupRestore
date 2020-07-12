@@ -11,10 +11,11 @@
   2. 备份与恢复
 """
 
-import json, argparse
+import os, json, uuid
+import argparse, sqlite3
 from kazoo import security
 from kazoo.client import KazooClient
-from xml.dom.minidom import Document
+import xml.dom.minidom as xmldom
 from xml.etree import ElementTree
 
 
@@ -66,12 +67,19 @@ class TiZkBackup(TiZkBackupRestoreBase):
         :param filename: 要保存的文件名
         """
         super(TiZkBackup, self).__init__(**kwargs)
-        self.filename = filename
+        self.xml_filename = filename + '.xml'
+        self.db_filename = filename + '.db'
 
-        self.xml_obj = Document()
+        # 准备XML
+        self.xml_obj = xmldom.Document()
         self.xml_root = self.xml_obj.createElement("ROOT")
         self.xml_obj.appendChild(self.xml_root)
 
+        # 准备sqlite
+        os.remove(self.db_filename)
+        self.db_conn = sqlite3.connect(self.db_filename)
+        self.db_conn.execute('CREATE TABLE zk_data (key_name CHAR(50) NOT NULL, key_value blob, PRIMARY KEY (key_name));')
+        self.db_conn.commit()
 
     def backup(self, path):
         """
@@ -82,10 +90,11 @@ class TiZkBackup(TiZkBackupRestoreBase):
         self.get_node(path, self.xml_root)
 
         # 保存文件
-        with open(self.filename, 'w') as f:
+        self.db_conn.close()
+        with open(self.xml_filename, 'w') as f:
             self.xml_obj.writexml(f, indent='', addindent='  ', newl='\n', encoding='utf-8')
 
-        print(f'备份完成，共备份节点:{self.node_count}，backup file:{self.filename}\n')
+        print(f'备份完成，共备份节点:{self.node_count}，backup file:{self.xml_filename}\n')
 
     def get_node(self, path, xml_parent):
         """
@@ -133,7 +142,13 @@ class TiZkBackup(TiZkBackupRestoreBase):
             data, stat = self.zk_connect.get(path)
             acls = self.zk_connect.get_acls(path)
 
-            xml_node.setAttribute('value', data.decode('utf8'))
+            # sqlite数据
+            key_name = str(uuid.uuid1())
+            self.db_conn.execute('insert into zk_data VALUES (?,?)', (key_name, data))  # sqlite3.Binary(data)
+            self.db_conn.commit()
+
+            # xml数据
+            xml_node.setAttribute('value', key_name)
             xml_node.setAttribute('ephemeral', str(stat.ephemeralOwner))
 
             # 生成acl的json格式数据，为了美观替换了"为'，所以在读取时也要反向操作
@@ -157,7 +172,11 @@ class TiZkRestore(TiZkBackupRestoreBase):
         :param filename: 要读取的文件名
         """
         super(TiZkRestore, self).__init__(**kwargs)
-        self.filename = filename
+        self.xml_filename = filename + '.xml'
+        self.db_filename = filename + '.db'
+
+        self.db_conn = sqlite3.connect(self.db_filename)
+        self.db_cur = self.db_conn.cursor()
 
 
     def restore(self, path):
@@ -166,15 +185,19 @@ class TiZkRestore(TiZkBackupRestoreBase):
         :param path:   要处理的根路径
         """
         try:
-            xml_obj = ElementTree.parse(self.filename)
+            xml_obj = ElementTree.parse(self.xml_filename)
             xml_root = xml_obj.getroot()[0]
-            new_path = '' if xml_root.tag == self.ZK_ROOT else path
-            self.put_node(new_path, xml_root)
+            dst_path = '' if xml_root.tag == self.ZK_ROOT else path
+            self.put_node(dst_path, xml_root)
         except Exception as e:
             print('restore error: {}'.format(e))
             return False
 
-        print(f'恢复完成，共恢复节点:{self.node_count}，restore file:{self.filename}\n')
+        self.db_cur.close()
+        del self.db_cur
+        self.db_conn.close()
+
+        print(f'恢复完成，共恢复节点:{self.node_count}，restore file:{self.xml_filename}\n')
         return True
 
 
@@ -215,20 +238,23 @@ class TiZkRestore(TiZkBackupRestoreBase):
         """
         try:
             # 读取节点分析
-            value = xml_node.attrib['value']
+            key_name = xml_node.attrib['value']
             ephemeral = xml_node.attrib['ephemeral']
             acl_str = xml_node.attrib['acl'].replace("'", '"')
             acl_data = json.loads(acl_str)
+
+            self.db_cur.execute('select key_value from zk_data where key_name=?', (key_name,))
+            value = self.db_cur.fetchone()[0]
 
             # 创建或更新节点
             self.node_count += 1
             acl_rule = security.ACL(acl_data['perms'], security.Id(acl_data['scheme'], acl_data['id']))
             if self.zk_connect.exists(path):
-                self.zk_connect.set(path, value.encode('utf8'))
+                self.zk_connect.set(path, value)
                 self.zk_connect.set_acls(path, [acl_rule])
             else:
                 ephemeral = True if ephemeral == '1' else False
-                self.zk_connect.create(path, value.encode('utf8'), [acl_rule], ephemeral=ephemeral)
+                self.zk_connect.create(path, value, [acl_rule], ephemeral=ephemeral)
 
             # 打印调试信息
             if self.print_debug:
@@ -242,14 +268,14 @@ class TiZkRestore(TiZkBackupRestoreBase):
 
 # 测试
 if __name__ == '__main__':
-    is_test = False
+    is_test = not False
 
     # 测试模式
     if is_test:
         zk_serv_src = '10.0.10.112:2181'
         zk_serv_dst = '10.0.10.112:2181'
         zk_auth = [('digest', 'jyp:123456')]
-        zk_file = './zk_backup.xml'
+        zk_file = './zk_backup'
         zk_root = '/'
         zkb = TiZkBackup(zk_file, hosts=zk_serv_src, auth_data=zk_auth, print_debug=True)
         zkb.backup(zk_root)
